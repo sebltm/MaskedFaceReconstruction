@@ -1,5 +1,4 @@
 import tensorflow as tf
-import datetime
 
 
 def squash(tensor: tf.Tensor, axis=-1):
@@ -88,9 +87,6 @@ class CapsLayer(tf.keras.layers.Layer):
             if self.hist_writer:
                 with self.hist_writer.as_default():
                     tf.summary.histogram("agreement", agreement, step=self.step)
-
-            # agreement = tf.squeeze(
-            #     tf.matmul(tf.expand_dims(uji, axis=-1), tf.expand_dims(vj, axis=-1), transpose_a=True), [4], name="agreement")
 
             b += agreement
 

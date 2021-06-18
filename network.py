@@ -1,8 +1,7 @@
-import capsules
 import tensorflow as tf
 import tensorflow.keras.layers as layers
 
-import data
+import capsules
 
 
 class VGG16(tf.keras.Model):
@@ -119,7 +118,6 @@ class FaceCapsNet(tf.keras.Model):
 
         self.face_caps.build(input_shape=self.primary_caps.compute_output_shape(input_shape=(None, 242, 242, 256)))
 
-
     def call(self, inputs, training=None, mask=None):
         output = self.reshape(inputs)
         output = self.conv(output)
@@ -183,33 +181,6 @@ class SiameseCaps(tf.keras.models.Model):
         if self.caps:
             self.faceNet.reset()
 
-    # def train(self, train_set: data.Dataset, epochs=15):
-    #     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
-    #
-    #     loss_metric = tf.keras.metrics.Mean()
-    #
-    #     self.build(input_shape=(None, 3, 250, 250, 3))
-    #     self.summary()
-    #
-    #     loss_fn = self.TripletLoss()
-    #     self.compile(loss=loss_fn, optimizer='adam')
-    #
-    #     for epoch in range(epochs):
-    #         embeddings = self.faceCaps.predict(train_set)
-    #
-    #         # GET HARD TRIPLETS
-    #         triplet_ds = [embeddings]
-    #         for step, (x_batch_train, y_batch_train) in enumerate(triplet_ds):
-    #             with tf.GradientTape() as tape:
-    #
-    #                 logits = self(x_batch_train, training=True)
-    #
-    #                 loss_value = loss_fn(y_batch_train, logits)
-    #
-    #             grads = tape.gradient(loss_value, self.trainable_weights)
-    #
-    #             optimizer.apply_gradients(zip(grads, self.trainable_weights))
-
     class TripletLoss(tf.keras.losses.Loss):
 
         def __init__(self, alpha=10e-14):
@@ -226,23 +197,9 @@ class SiameseCaps(tf.keras.models.Model):
             positive = tf.reshape(positive, shape=(batch_size, -1))
             negative = tf.reshape(negative, shape=(batch_size, -1))
 
-            # print(anchor)
-            # print(positive)
-            # print(negative)
-            #
-            # print(anchor - positive)
-            # print(anchor - negative)
-
             positive_dist = tf.reduce_sum(tf.square(anchor - positive), axis=1)
             negative_dist = tf.reduce_sum(tf.square(anchor - negative), axis=1)
 
-            # print("Positive", positive_dist)
-            # print("Negative", negative_dist)
-            #
-            # print(positive_dist - negative_dist)
-
             loss = tf.maximum(positive_dist - negative_dist + self.alpha, 0.)
-
-            # print("Loss", loss)
 
             return loss
