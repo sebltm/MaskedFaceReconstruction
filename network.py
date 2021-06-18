@@ -85,7 +85,8 @@ class VGG16(tf.keras.Model):
 
 class FaceCapsNet(tf.keras.Model):
 
-    def __init__(self, output_size, filters=256, kernel=9, strides_conv=1, strides_caps=2, routings=3):
+    def __init__(self, mid_size, output_size, dims=8, filters=256, kernel=9, strides_conv=1, strides_caps=2, routings=3,
+                 hist_writer=None):
         super(FaceCapsNet, self).__init__()
 
         self.kernel = kernel
@@ -99,21 +100,32 @@ class FaceCapsNet(tf.keras.Model):
                                   activation='relu')
 
         # Output shape = (batch, 219024, 8)
-        self.primary_caps = capsules.PrimaryCaps(dim_capsule=8, n_channels=16, kernel=self.kernel,
+        self.primary_caps = capsules.PrimaryCaps(dim_capsule=dims, n_channels=mid_size, kernel=self.kernel,
                                                  strides=self.strides_caps, padding='valid')
 
+        self.mid_caps = capsules.CapsLayer(num_caps=12, dim_caps=dims, routings=routings, hist_writer=hist_writer)
+        self.reshape_caps = layers.Reshape(target_shape=[-1, dims])
+
         # Output shape =
-        self.face_caps = capsules.CapsLayer(num_caps=output_size, dim_caps=8, routings=routings)
+        self.face_caps = capsules.CapsLayer(num_caps=output_size, dim_caps=dims, routings=routings, hist_writer=hist_writer)
 
         self.primary_caps.build(input_shape=(None, 242, 242, 256))
-        self.face_caps.build(input_shape=(None, 219024, 8))
+        # self.mid_caps.build(input_shape=self.primary_caps.compute_output_shape(input_shape=(None, 242, 242, 256)))
+        # self.face_caps.build(
+        #     input_shape=self.reshape_caps.compute_output_shape(
+        #         input_shape=self.mid_caps.compute_output_shape(
+        #             input_shape=self.primary_caps.compute_output_shape(
+        #                 input_shape=(None, 242, 242, 256)))))
+
+        self.face_caps.build(input_shape=self.primary_caps.compute_output_shape(input_shape=(None, 242, 242, 256)))
+
 
     def call(self, inputs, training=None, mask=None):
-        inputs = self.reshape(inputs)
-        x1 = self.conv(inputs)
-        x1 = self.primary_caps(x1)
-        x1 = self.face_caps(x1)
-        return x1
+        output = self.reshape(inputs)
+        output = self.conv(output)
+        output = self.primary_caps(output)
+        output = self.face_caps(output)
+        return output
 
     def train(self, model: tf.keras.Model, data, args):
         model.compile(optimizer=tf.optimizers.Adam(lr=args.lr),
@@ -121,19 +133,25 @@ class FaceCapsNet(tf.keras.Model):
                       loss_weights=[1., args.lam_recon],
                       metrics={'capsnet': 'accuracy'})
 
+    def reset(self):
+        self.face_caps.reset()
+
 
 class SiameseCaps(tf.keras.models.Model):
 
-    def __init__(self, output_size, filters=256, kernel=9, strides_conv=1, strides_caps=2, routings=3, caps=True, *args,
-                 **kwargs):
+    def __init__(self, mid_size, output_size, dims=8, filters=256, kernel=9, strides_conv=1, strides_caps=2, routings=3,
+                 caps=True, hist_writer=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.caps = caps
 
         if caps:
-            self.faceNet = FaceCapsNet(output_size=output_size, filters=filters, kernel=kernel,
-                                       strides_conv=strides_conv,
-                                       strides_caps=strides_caps, routings=routings)
+            self.faceNet = FaceCapsNet(mid_size=mid_size, output_size=output_size, dims=dims, filters=filters,
+                                       kernel=kernel, strides_conv=strides_conv, strides_caps=strides_caps,
+                                       routings=routings, hist_writer=hist_writer)
         else:
             self.faceNet = VGG16()
+            output_size = 10
+            dims = 8
 
         self.faceNet.build(input_shape=(None, 250, 250, 3))
         self.faceNet.summary()
@@ -145,7 +163,7 @@ class SiameseCaps(tf.keras.models.Model):
         self.s3 = self.faceNet
 
         self.concat = tf.keras.layers.Concatenate(axis=1)
-        self.out_shape = tf.keras.layers.Reshape(target_shape=(3, 10, 8))
+        self.out_shape = tf.keras.layers.Reshape(target_shape=(3, output_size, dims))
 
         self.lambda_split.build(input_shape=(3, 250, 250, 3))
 
@@ -160,6 +178,10 @@ class SiameseCaps(tf.keras.models.Model):
         out = self.concat([anchor, positive, negative])
         out = self.out_shape(out)
         return out
+
+    def reset(self):
+        if self.caps:
+            self.faceNet.reset()
 
     # def train(self, train_set: data.Dataset, epochs=15):
     #     optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
@@ -190,7 +212,7 @@ class SiameseCaps(tf.keras.models.Model):
 
     class TripletLoss(tf.keras.losses.Loss):
 
-        def __init__(self, alpha=10e-5):
+        def __init__(self, alpha=10e-14):
             super().__init__()
 
             self.alpha = alpha
@@ -208,7 +230,6 @@ class SiameseCaps(tf.keras.models.Model):
             # print(positive)
             # print(negative)
             #
-            # print()
             # print(anchor - positive)
             # print(anchor - negative)
 
@@ -218,7 +239,7 @@ class SiameseCaps(tf.keras.models.Model):
             # print("Positive", positive_dist)
             # print("Negative", negative_dist)
             #
-            # print("\n")
+            # print(positive_dist - negative_dist)
 
             loss = tf.maximum(positive_dist - negative_dist + self.alpha, 0.)
 

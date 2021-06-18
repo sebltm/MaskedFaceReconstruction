@@ -1,12 +1,13 @@
+import datetime
 import pathlib
 import sys
-import tensorflow as tf
-import sklearn.model_selection
-from scipy import stats
-import tqdm
+
 import numpy as np
+import sklearn.model_selection
+import tensorflow as tf
+import tqdm
+
 import network
-import datetime
 
 
 # def _pairwise_distance(embed1, embed2, square=False):
@@ -69,41 +70,39 @@ def batch_hard(embed_masked, embed_unmasked, labels, chatty=False):
     embed_masked = tf.reshape(embed_masked, shape=(tf.shape(embed_masked)[0], -1))
     embed_unmasked = tf.reshape(embed_unmasked, shape=(tf.shape(embed_unmasked)[0], -1))
 
-    # norm_masked = tf.norm(embed_masked, axis=1)
-    # norm_unmasked = tf.norm(embed_unmasked, axis=1)
-    # distance = tf.matmul(embed_masked, embed_unmasked, transpose_b=True)
-    # distance = 1 - (distance / (norm_masked * norm_unmasked))
+    # norm_masked = tf.nn.l2_normalize(embed_masked, axis=1)
+    # norm_unmasked = tf.nn.l2_normalize(embed_unmasked, axis=-1)
+    # distance = 1 - tf.matmul(norm_masked, norm_unmasked, adjoint_b=True)
 
-    norm_masked = tf.nn.l2_normalize(embed_masked, axis=1)
-    norm_unmasked = tf.nn.l2_normalize(embed_unmasked, axis=-1)
-    distance = 1 - tf.matmul(norm_masked, norm_unmasked, transpose_b=True)
+    na = tf.reduce_sum(tf.square(embed_masked), axis=1)
+    nb = tf.reduce_sum(tf.square(embed_unmasked), axis=1)
+
+    na = tf.reshape(na, shape=(-1, 1))
+    nb = tf.reshape(nb, shape=(1, -1))
+
+    distance = tf.sqrt(tf.maximum(na - 2 * tf.matmul(embed_masked, embed_unmasked, transpose_b=True) + nb, 0.0))
 
     diag = tf.linalg.diag_part(distance)
 
-    dot_product = tf.linalg.set_diag(distance, tf.reduce_min(distance, axis=1))
+    dot_product = tf.linalg.set_diag(distance, tf.reduce_max(distance, axis=1))
 
     mins = tf.reduce_min(dot_product, axis=1)
     indices = tf.math.argmin(dot_product, axis=1)
 
-    mask = mins < diag
+    mask = mins <= diag
     none_array = tf.fill(tf.shape(indices), -1)
     none_array = tf.cast(none_array, tf.int64)
 
     masked_indices = tf.where(mask, indices, none_array)
 
     if chatty:
-        print(diag.numpy())
-        print(mins.numpy())
+        print("Diag", diag.numpy())
+        print("Mins", mins.numpy())
 
     return masked_indices
 
 
-def do_the_thing(i, x):
-    print(i, str(x, 'ascii'))
-    return x
-
-
-def make_batches(unmasked_list: tf.data.Dataset, masked_list: tf.data.Dataset, indices, num_el, batch_size=16):
+def make_batches(masked_list: tf.data.Dataset, unmasked_list: tf.data.Dataset, indices, num_el, batch_size=1):
     unmasked_list_enum = list(unmasked_list.take(num_el).as_numpy_iterator())
     masked_list_enum = list(masked_list.take(num_el).as_numpy_iterator())
 
@@ -139,10 +138,6 @@ def reshape_triplet(x1, x2, x3):
     x = tf.expand_dims(x, axis=0)
 
     return x
-
-
-def create_lambda():
-    yield tf.zeros(shape=(1, 3, 10, 8))
 
 
 class Dataset:
@@ -246,13 +241,32 @@ if __name__ == "__main__":
 
     np.set_printoptions(threshold=sys.maxsize)
 
-    logdir = "logs/scalars/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    imgdir = "logs/train_data/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=logdir)
-    file_writer = tf.summary.create_file_writer(imgdir)
-    log_writer = tf.summary.create_file_writer(logdir)
+    caps = True
+    log = True
+    log_vars = False
+    type_str = "caps"
+    output_caps = 12
+    mid_caps = 10
+    dims = 16
+    if not caps:
+        type_str = "vgg-16"
 
-    batch_size = 10
+    log_writer = None
+    hist_writer = None
+    if log:
+        logdir = "logs/scalars/" + type_str + "-mid-" + str(mid_caps) + "-" + str(dims) + "-out-" + str(output_caps) + \
+                 "-" + str(dims)
+        tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=logdir)
+        log_writer = tf.summary.create_file_writer(logdir)
+
+    if log_vars:
+        histdir = "logs/hist/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        hist_writer = tf.summary.create_file_writer(histdir)
+
+    # imgdir = "logs/scalars/" + type_str + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    # file_writer = tf.summary.create_file_writer(imgdir)
+
+    batch_size = 1
 
     dataset = Dataset(batch_size=batch_size, base_path_str="../MaskedFaceGeneration/")
     datasets, labels = dataset.process_split()
@@ -274,14 +288,16 @@ if __name__ == "__main__":
     test_set_unmasked = datasets_processed[3]
     test_set_labels = labels[1]
 
-    with file_writer.as_default():
-        images = train_set_masked.take(5)
-        images = np.reshape(list(images.as_numpy_iterator()), (-1, 250, 250, 3))
-        tf.summary.image("Training data", images, step=0)
+    # with file_writer.as_default():
+    #     images = train_set_masked.take(5)
+    #     images = np.reshape(list(images.as_numpy_iterator()), (-1, 250, 250, 3))
+    #     tf.summary.image("Training data", images, step=0)
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=10e-8)
+    # Loss without caps: 10e-6
+    # Loss with caps: 10e-2
+    optimizer = tf.keras.optimizers.Adam(learning_rate=10e-10) if caps else tf.keras.optimizers.Adam(learning_rate=10e-6)
 
-    net = network.SiameseCaps(output_size=10, caps=True)
+    net = network.SiameseCaps(mid_size=mid_caps, output_size=output_caps, caps=caps, hist_writer=hist_writer)
     net.build(input_shape=(None, 3, 250, 250, 3))
     net.summary()
 
@@ -290,59 +306,96 @@ if __name__ == "__main__":
 
     fcNet = net.faceNet
 
-    y = tf.data.Dataset.from_generator(create_lambda,
-                                       output_signature=(tf.TensorSpec(shape=(1, 10, 8), dtype=tf.float32)))
+    steps = 5000
+    epochs = 20
 
-    steps = int(1500 / batch_size)
-    epochs = 1
+    loss_metric = tf.keras.metrics.Mean()
+    accuracy = tf.keras.metrics.SparseCategoricalAccuracy()
 
-    tf.profiler.experimental.start('logs/perf')
     for epoch in range(epochs):
-        loss_metric = tf.keras.metrics.Mean()
-        accuracy = tf.keras.metrics.SparseCategoricalAccuracy()
+        loss_metric.reset_state()
+        accuracy.reset_state()
 
         embeddings_masked = fcNet.predict(train_set_masked, steps=steps, batch_size=batch_size, verbose=True)
         embeddings_unmasked = fcNet.predict(train_set_unmasked, steps=steps, batch_size=batch_size, verbose=True)
 
+        ### VALIDATION ###
+        val_masked = fcNet.predict(test_set_masked, steps=steps, batch_size=batch_size, verbose=True)
+        val_unmasked = fcNet.predict(test_set_unmasked, steps=steps, batch_size=batch_size, verbose=True)
+
         with tf.device("/cpu:0"):
             indices = batch_hard(embeddings_masked, embeddings_unmasked, list(train_set_labels)[:steps], chatty=False)
 
+            # anchor = None
+            # for name in datasets[0].as_numpy_iterator():
+            #     print(name)
+            #     anchor = Dataset.process_path(str(name, 'ascii'))
+            #     break
+            #
+            # positive = None
+            # for name in datasets[1].as_numpy_iterator():
+            #     print(name)
+            #     positive = Dataset.process_path(str(name, 'ascii'))
+            #     break
+            #
+            # np_set = list(datasets[1].as_numpy_iterator())
+            # negative = None
+            # for index in indices:
+            #     print(np_set[index])
+            #     negative = Dataset.process_path(str(np_set[index], 'ascii'))
+            #     break
+            #
+            # a_y = fcNet.predict(tf.reshape(anchor, shape=(1, 250, 250, 3)))
+            # p_y = fcNet.predict(tf.reshape(positive, shape=(1, 250, 250, 3)))
+            # n_y = fcNet.predict(tf.reshape(negative, shape=(1, 250, 250, 3)))
+            #
+            # a_y = tf.reshape(a_y, shape=(1, -1))
+            # p_y = tf.reshape(p_y, shape=(1, -1))
+            # n_y = tf.reshape(n_y, shape=(1, -1))
+            #
+            # print(tf.reduce_sum(tf.square(a_y - p_y), axis=1))
+            # print(tf.reduce_sum(tf.square(a_y - n_y), axis=1))
+
             num_el = len(indices) if steps is None else steps
-            hard_triplets = make_batches(datasets[0],
-                                         datasets[1],
-                                         indices, num_el=num_el, batch_size=1)
+            hard_triplets = make_batches(datasets[0],  # train_masked
+                                         datasets[1],  # train_unmasked
+                                         indices, num_el=num_el, batch_size=batch_size)
 
         step = 0
         for x, y in tqdm.tqdm(hard_triplets):
             with tf.GradientTape() as tape:
                 y_ = net(x, training=True)
                 loss_value = loss_fn(y_true=y, y_pred=y_)
-                grads = tape.gradient(loss_value, net.trainable_variables)
 
-            optimizer.apply_gradients(zip(grads, net.trainable_variables))
+            grads = tape.gradient(loss_value, net.trainable_weights)
+            optimizer.apply_gradients(zip(grads, net.trainable_weights))
 
             loss_metric.update_state(loss_value)
             # accuracy.update_state(y, net(x, training=True))
 
+            if log:
+                with log_writer.as_default():
+                    tf.summary.scalar("loss_" + str(epoch), loss_value, step=step)
+
             step += 1
 
         print("Loss {0} at epoch {1}".format(loss_metric.result(), epoch))
-        with log_writer.as_default():
-            tf.summary.scalar("epoch_loss", loss_value, step=epoch)
+
+        if log:
+            with log_writer.as_default():
+                tf.summary.scalar("epoch_loss", loss_metric.result(), step=epoch)
 
         validation_accuracy = 0
-        val_masked = fcNet.predict(test_set_masked, steps=steps, batch_size=batch_size, verbose=True)
-        val_unmasked = fcNet.predict(test_set_unmasked, steps=steps, batch_size=batch_size, verbose=True)
-
         with tf.device("/cpu:0"):
             val_indices = batch_hard(val_masked, val_unmasked, list(test_set_labels), chatty=True)
-            val_hard_triplets = make_batches(datasets[2],
-                                             datasets[3],
-                                             val_indices, num_el=num_el)
+            val_hard_triplets = make_batches(datasets[2],  # test_masked
+                                             datasets[3],  # test_unmasked
+                                             val_indices, num_el=num_el, batch_size=batch_size)
 
         for x, _ in tqdm.tqdm(val_hard_triplets):
             val_y_ = net(x, training=False)
             anchor, positive, negative = tf.split(val_y_, num_or_size_splits=3, axis=1)
+
             anchor = tf.reshape(anchor, shape=(1, -1))
             positive = tf.reshape(positive, shape=(1, -1))
             negative = tf.reshape(negative, shape=(1, -1))
@@ -352,9 +405,14 @@ if __name__ == "__main__":
 
             validation_accuracy = validation_accuracy + 1 if positive_dist < negative_dist else validation_accuracy
 
-        with log_writer.as_default():
-            tf.summary.scalar("validation_accuracy", validation_accuracy / len(indices), step=epoch)
+        elements_classified = min(len(test_set_masked), steps)
+        correctly_classified = elements_classified - len(val_hard_triplets) + validation_accuracy
+        print("Additional correct classifications:", validation_accuracy)
+        print("Correctly classified:", correctly_classified)
+        print(f"Validation accuracy: { correctly_classified / elements_classified * 100}%")
+        if log:
+            with log_writer.as_default():
+                tf.summary.scalar("validation_accuracy", correctly_classified / elements_classified * 100, step=epoch)
         # print("Epoch {:03d}: Loss: {:.3f}, Accuracy: {:.3%}".format(epoch,
         #                                                             loss_metric.result(),
         #                                                             accuracy.result()))
-    tf.profiler.experimental.stop()
