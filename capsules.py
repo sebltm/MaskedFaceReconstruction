@@ -1,7 +1,7 @@
 import tensorflow as tf
 
 
-def squash(tensor: tf.Tensor, axis=-1):
+def squash(tensor: tf.Tensor, axis=-2):
     s_squared_norm = tf.reduce_sum(tf.square(tensor), axis=axis, keepdims=True)
 
     safe_norm = tf.sqrt(s_squared_norm + 1e-7)
@@ -19,7 +19,7 @@ class CapsLayer(tf.keras.layers.Layer):
         self.dim_caps = dim_caps
         self.routings = routings
         self.kernel_init = tf.keras.initializers.get(init)
-        self.squash_agreement = tf.keras.layers.Lambda(squash, arguments={"axis": -2})
+        self.squash_agreement = tf.keras.layers.Lambda(squash, arguments={"axis": -2}, dtype='float32')
 
         self.batch_size = None
         self.input_num_caps = None
@@ -38,10 +38,8 @@ class CapsLayer(tf.keras.layers.Layer):
 
         # Shape = (219024, 10, 8, 8)
         self.W = self.add_weight(shape=[self.input_num_caps, self.num_caps,
-                                        self.input_dim_caps, self.dim_caps],
-                                 initializer=self.kernel_init, dtype=tf.float32, trainable=True)
-
-        self.reshape_input = tf.keras.layers.Reshape(target_shape=(-1, self.input_dim_caps))
+                                        self.dim_caps, self.input_dim_caps],
+                                 initializer=self.kernel_init, name='weight_matrix', trainable=True)
 
         self.built = True
 
@@ -52,17 +50,20 @@ class CapsLayer(tf.keras.layers.Layer):
         # k = input_dim_caps
         # l = dim_caps
 
-        # W_shape = (primary_caps_num, secondary_caps_num, primary_caps_dim, secondary_caps_dim) = (i, j, k, l)
-        # inputs_shape = (batch, primary_caps_num, primary_caps_dim) = (b, i, k)
-        # output_shape = (batch, primary_caps_num, secondary_caps_num, secondary_caps_dim) = (b, i, j, l)
-        uji = tf.einsum('ijkl,bik->bijl', self.W, inputs, name="predict_caps2")
+        inputs = tf.reshape(inputs, shape=(-1, self.input_num_caps, 1, self.input_dim_caps, 1))
+        inputs = tf.tile(inputs, [1, 1, self.num_caps, 1, 1])
+
+        # W_shape = (input_num_caps, num_caps, dim_caps, input_dim_caps) = (i, j, l, k)
+        # inputs_shape = (batch, input_num_caps, num_caps, input_dim_caps, 1) = (b, i, j, k, m)
+        # output_shape = (batch, input_num_caps, num_caps, dim_caps, 1) = (b, i, j, l, m)
+        uji = tf.einsum('ijlk,bijkm->bijlm', self.W, inputs, name="predict_caps2")
 
         if self.hist_writer:
             with self.hist_writer.as_default():
                 tf.summary.histogram("uji", uji, step=self.step)
 
-        # b_shape = (batch, 219024, 10, 1)
-        b = tf.zeros(shape=[tf.shape(inputs)[0], self.input_num_caps, self.num_caps, 1])
+        # b_shape = (batch, input_num_caps, num_caps) = (batch, 219024, 10, 1)
+        b = tf.zeros(shape=[1, self.input_num_caps, self.num_caps, 1, 1])
         vj = None
         for i in range(self.routings):
             cj = tf.nn.softmax(b, axis=-1)
@@ -70,20 +71,21 @@ class CapsLayer(tf.keras.layers.Layer):
             # s_shape = (batch, 1, 10, 8)
             s_pred = tf.multiply(cj, uji)
             s = tf.reduce_sum(s_pred, axis=1, keepdims=True)
-            s = tf.expand_dims(s, axis=-1)
             if self.hist_writer:
                 with self.hist_writer.as_default():
                     tf.summary.histogram("s", s, step=self.step)
 
             vj = self.squash_agreement(s)
+            vj_tiled = tf.tile(vj, [1, self.input_num_caps, 1, 1, 1])
             if self.hist_writer:
                 with self.hist_writer.as_default():
                     tf.summary.histogram("vj", vj, step=self.step)
 
-            # uji_shape = (batch, 219024, 10, 8) = (b, i, j, k)
-            # vj_shape = (batch, 1, 10, 8, 1) = (b, m, j, k, z)
+            # uji_shape = (batch, 219024, 16, 8, 1) = (b, i, j, k)
+            # vj_shape = (batch, 8, 16, 8, 1) = (b, k, j, l)
             # agreement_output = (batch, 21924, 10, 1) = (b, i, j, m)
-            agreement = tf.einsum('bijk,bmjkz->bijm', uji, vj)
+            # agreement = tf.einsum('bijk,bmjk->bijm', uji, vj)
+            agreement = tf.matmul(uji, vj_tiled, transpose_a=True)
             if self.hist_writer:
                 with self.hist_writer.as_default():
                     tf.summary.histogram("agreement", agreement, step=self.step)
@@ -98,14 +100,14 @@ class CapsLayer(tf.keras.layers.Layer):
 
 class PrimaryCaps(tf.keras.layers.Layer):
 
-    def __init__(self, dim_capsule=8, n_channels=16, kernel=9, strides=2, padding='valid'):
+    def __init__(self, dim_capsule=8, n_channels=8, kernel=9, strides=2, padding='valid'):
         super(PrimaryCaps, self).__init__()
 
         # Input shape = (batch, 242, 242, 256)
         self.conv = tf.keras.layers.Conv2D(filters=dim_capsule * n_channels, kernel_size=kernel, strides=strides,
-                                           padding=padding)  # Output shape = (batch, 117, 117, dim * channel)
-        self.reshape = tf.keras.layers.Reshape(target_shape=[-1, dim_capsule])  # Output shape = (batch, num_caps, dim)
-        self.squash = tf.keras.layers.Lambda(squash)  # Output shape = (batch, num_caps, dim)
+                                           padding=padding, name="primary_conv")  # Output shape = (batch, 117, 117, dim * channel)
+        self.reshape = tf.keras.layers.Reshape(target_shape=[-1, dim_capsule], name="reshape_primary")  # Output shape = (batch, num_caps, dim)
+        self.squash = tf.keras.layers.Lambda(squash, name="squash_primary")  # Output shape = (batch, num_caps, dim)
 
     def call(self, inputs, **kwargs):
 

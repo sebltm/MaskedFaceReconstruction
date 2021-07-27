@@ -1,83 +1,71 @@
-import datetime
+import itertools
 import pathlib
-import sys
 
 import numpy as np
 import sklearn.model_selection
 import tensorflow as tf
-import tqdm
 
-import network
+import constants
 
 
-def batch_hard(embed_masked, embed_unmasked, chatty=False):
-    embed_masked = tf.reshape(embed_masked, shape=(tf.shape(embed_masked)[0], -1))
-    embed_unmasked = tf.reshape(embed_unmasked, shape=(tf.shape(embed_unmasked)[0], -1))
+def batch_hard(embed_masked, embed_unmasked, labels, chatty=False):
 
-    na = tf.reduce_sum(tf.square(embed_masked), axis=1)
-    nb = tf.reduce_sum(tf.square(embed_unmasked), axis=1)
+    # Get the dot product
+    na = tf.matmul(embed_masked, tf.transpose(embed_masked))
+    nb = tf.matmul(embed_unmasked, tf.transpose(embed_unmasked))
 
-    na = tf.reshape(na, shape=(-1, 1))
-    nb = tf.reshape(nb, shape=(1, -1))
+    square_norm_na = tf.linalg.diag_part(na)
+    square_norm_nb = tf.linalg.diag_part(nb)
 
-    distance = tf.sqrt(tf.maximum(na - 2 * tf.matmul(embed_masked, embed_unmasked, transpose_b=True) + nb, 0.0))
+    # Get the distance matrix
+    distance = tf.sqrt(tf.maximum(tf.expand_dims(square_norm_na, 0)
+                                  - 2 * tf.matmul(embed_masked, tf.transpose(embed_unmasked))
+                                  + tf.expand_dims(square_norm_nb, 1), 0.0))
+
+    # Tile the label array: each row contains the labels
+    label_array = tf.expand_dims(labels, axis=0)
+    label_array = tf.tile(label_array, [len(labels), 1])
+
+    # Tile the label array: each row contains the label at the index of the current image, repeated
+    diag_label = tf.expand_dims(labels, axis=-1)
+    diag_label = tf.tile(diag_label, [1, len(labels)])
+
+    # Get the max distance for each image
+    max_dist = tf.reduce_max(distance, axis=0)
+    max_dist = tf.expand_dims(max_dist, axis=-1)
+    max_dist = tf.tile(max_dist, [1, len(max_dist)])
 
     diag = tf.linalg.diag_part(distance)
 
-    dot_product = tf.linalg.set_diag(distance, tf.reduce_max(distance, axis=1))
+    zero_array = tf.zeros(shape=distance.shape)
 
-    mins = tf.reduce_min(dot_product, axis=1)
-    indices = tf.math.argmin(dot_product, axis=1)
+    # Get the index of positive with largest distance
+    find_max_positive = tf.where(label_array == diag_label, distance, zero_array)
+    diag = tf.reduce_max(find_max_positive, axis=0)
+    positive_indices = tf.math.argmax(find_max_positive, axis=0)
+
+    dot_product = tf.where(label_array == diag_label, max_dist, distance)
+
+    mins = tf.reduce_min(dot_product, axis=0)
+    indices = tf.math.argmin(dot_product, axis=0)
 
     mask = mins <= diag
     none_array = tf.fill(tf.shape(indices), -1)
     none_array = tf.cast(none_array, tf.int64)
 
-    masked_indices = tf.where(mask, indices, none_array)
+    negative_indices = tf.where(mask, indices, none_array)
 
     if chatty:
+        print("Dist", distance.numpy())
+        print("Label", label_array == diag_label)
+        print("Find_max_positive", find_max_positive)
+        print("Positive_indices", positive_indices)
         print("Diag", diag.numpy())
         print("Mins", mins.numpy())
+        print("Negative", negative_indices.numpy())
+        print("Positive", positive_indices.numpy())
 
-    return masked_indices
-
-
-def make_batches(masked_list: tf.data.Dataset, unmasked_list: tf.data.Dataset, indices, num_el, batch_size=1):
-    unmasked_list_enum = list(unmasked_list.take(num_el).as_numpy_iterator())
-    masked_list_enum = list(masked_list.take(num_el).as_numpy_iterator())
-
-    unmasked_set = tf.data.Dataset.from_tensor_slices(
-        [str(path, 'ascii') for i, path in enumerate(unmasked_list_enum) if indices[i] != -1])
-    masked_set = tf.data.Dataset.from_tensor_slices(
-        [str(path, 'ascii') for i, path in enumerate(masked_list_enum) if indices[i] != -1])
-
-    negatives_list = np.array(list(unmasked_list.as_numpy_iterator())).take([index for index in indices if index != -1])
-    negatives_set = tf.data.Dataset.from_tensor_slices([str(path, 'ascii') for path in negatives_list])
-
-    unmasked_set = unmasked_set.map(Dataset.process_path)
-    masked_set = masked_set.map(Dataset.process_path)
-    negatives_set = negatives_set.map(Dataset.process_path)
-
-    x_set = tf.data.Dataset.zip((masked_set, unmasked_set, negatives_set)).map(reshape_triplet)
-
-    y_set = tf.zeros(shape=(len(x_set), 3, 10, 8))
-    y_set = tf.data.Dataset.from_tensor_slices(y_set)
-
-    complete_set = tf.data.Dataset.zip((x_set, y_set))
-    complete_set = complete_set.batch(batch_size=batch_size)
-
-    return complete_set
-
-
-def reshape_triplet(x1, x2, x3):
-    x1 = tf.reshape(x1, shape=(1, 250, 250, 3))
-    x2 = tf.reshape(x2, shape=(1, 250, 250, 3))
-    x3 = tf.reshape(x3, shape=(1, 250, 250, 3))
-
-    x = tf.concat((x1, x2, x3), axis=0)
-    x = tf.expand_dims(x, axis=0)
-
-    return x
+    return negative_indices, positive_indices
 
 
 class Dataset:
@@ -85,18 +73,35 @@ class Dataset:
     def __init__(self, train_test_split=(0.8, 0.2), batch_size=32, base_path_str="../MaskedFaceGeneration"):
 
         if sum(train_test_split) != 1 or len(train_test_split) != 2:
-            raise ValueError("Train test split must be equal to 1")
+            raise ValueError("Train/test split must be equal to 1")
 
         self.train_split = train_test_split[0]
         self.batch_size = batch_size
 
         self.basePath = pathlib.Path(base_path_str)
-        self.datasetUnmasked = list(pathlib.Path(f"{str(self.basePath / 'LFW')}").glob("./**/*.jpg"))
-        self.datasetMasked = list(pathlib.Path(f"{str(self.basePath / 'LFW-masked')}").glob("./**/*.jpg"))
+
+        folder_list = list(pathlib.Path(f"{str(self.basePath / 'LFW')}").glob("./*"))
+        unmasked_examples = [list(folder.glob("*.jpg")) for folder in folder_list
+                             if len(list(folder.glob("*.jpg"))) > 1]
+        unmasked_examples = list(itertools.chain.from_iterable(unmasked_examples))
+
+        folder_list = list(pathlib.Path(f"{str(self.basePath / 'LFW-masked')}").glob("./*"))
+        masked_examples = [list(folder.glob("*.jpg")) for folder in folder_list
+                           if len(list(folder.glob("*.jpg"))) > 1]
+        masked_examples = list(itertools.chain.from_iterable(masked_examples))
+
+        self.datasetUnmasked = unmasked_examples
+        self.datasetMasked = masked_examples
 
         self.all_labels = []
         self.le = sklearn.preprocessing.LabelEncoder()
-        self._masked_train_data = self._masked_test_data = self._unmasked_train_data = self._unmasked_test_data = []
+
+        self._masked_train_data = self._masked_test_data = self._unmasked_train_data = \
+            self._unmasked_test_data = tf.data.Dataset
+
+        self._masked_test_data_iter = self._masked_train_data_iter = self._unmasked_test_data_iter = \
+            self._unmasked_train_data_iter = self._test_labels_iter = self._train_labels_iter = None
+
         self._train_labels = self._test_labels = []
         self.train_split = train_test_split[0]
 
@@ -134,8 +139,8 @@ class Dataset:
                 masked_path = pathlib.Path("/".join(masked_path))
 
                 if masked_path.exists():
-                    masked.append(str(masked_path.resolve()))
-                    unmasked.append(str(unmasked_path.resolve()))
+                    masked.append(str(masked_path.resolve(strict=True)))
+                    unmasked.append(str(unmasked_path.resolve(strict=True)))
                     labels.append(label)
                     self.all_labels.add(label)
 
@@ -145,167 +150,92 @@ class Dataset:
         self._masked_test_data = tf.data.Dataset.from_tensor_slices(masked_test)
         self._unmasked_test_data = tf.data.Dataset.from_tensor_slices(unmasked_test)
 
-        self._train_labels = tf.data.Dataset.from_tensor_slices(train_labels)
-        self._test_labels = tf.data.Dataset.from_tensor_slices(test_labels)
-
         test_train_sets = [self._masked_train_data, self._unmasked_train_data, self._masked_test_data,
                            self._unmasked_test_data]
+
+        self.all_labels = list(self.all_labels)
+        self.le.fit(self.all_labels)
+
+        self._train_labels = tf.data.Dataset.from_tensor_slices(self.le.transform(train_labels))
+        self._test_labels = tf.data.Dataset.from_tensor_slices(self.le.transform(test_labels))
         test_train_labels = [self._train_labels, self._test_labels]
 
-        transformed_labels = []
-        self.all_labels = list(self.all_labels)
+        return test_train_sets, test_train_labels
 
-        for label_set in test_train_labels:
-            transformed_label = label_set.map(self.decode_label)
-            transformed_labels.append(transformed_label)
+    def get_data(self, masked=True, train=True):
 
-        return test_train_sets, transformed_labels
+        if masked and train:
+            return self._masked_train_data
+        if masked:
+            return self._masked_test_data
+        if train:
+            return self._unmasked_train_data
+
+        return self._unmasked_test_data
+
+    def get_labels(self, train=True):
+
+        if train:
+            return self._train_labels
+
+        return self._test_labels
 
     @staticmethod
     def process_path(file_path):
-        image_raw = tf.io.read_file(file_path)
-        image = tf.image.decode_image(image_raw, dtype=tf.float32)
-        img_conv = tf.reshape(image, shape=(250, 250, 3))
+        try:
+            image_raw = tf.io.read_file(file_path)
+            image = tf.image.decode_jpeg(image_raw, channels=3)
+            img_conv = tf.image.convert_image_dtype(image, dtype=tf.float32, saturate=False)
+            img_resize = tf.image.resize(img_conv, size=(constants.IMAGE_SIZE, constants.IMAGE_SIZE))
+            ind_img = tf.reshape(img_resize, shape=(1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
 
-        return img_conv
+            return ind_img
+        except TypeError:
+            print(file_path)
 
     def decode_label(self, label: tf.Tensor):
         label = tf.argmax(tf.cast(label == self.all_labels, tf.int32))
         return label
 
+    def next_triplet(self):
+        return next(self._masked_epoch_data), \
+               next(self._unmasked_same_epoch_data), \
+               next(self._unmasked_diff_epoch_data), \
+               next(self._negative_epoch_data)
 
-if __name__ == "__main__":
-    physical_devices = tf.config.experimental.list_physical_devices('GPU')
-    assert len(physical_devices) > 0, "Not enough GPU hardware devices available"
-    config = tf.config.experimental.set_memory_growth(physical_devices[0], True)
+    def extract_sets(self, negative_indices, positive_indices, num_el, train=True):
 
-    np.set_printoptions(threshold=sys.maxsize)
+        if train:
+            masked_set = self._masked_train_data
+            unmasked_set = self._unmasked_train_data
+        else:
+            masked_set = self._masked_test_data
+            unmasked_set = self._unmasked_test_data
 
-    caps = True
-    log = True
-    log_vars = False
-    output_caps = 12
-    mid_caps = 10
-    dims = 16
-    batch_size = 1
+        masked_list_enum = list(masked_set.take(num_el).as_numpy_iterator())
+        unmasked_list_enum = list(unmasked_set.take(num_el).as_numpy_iterator())
 
-    type_str = "caps" if caps else "vgg-16"
+        masked_epoch_set = tf.data.Dataset.from_tensor_slices(
+            [str(path, 'ascii') for i, path in enumerate(masked_list_enum) if negative_indices[i] != -1])
+        unmasked_epoch_same_set = tf.data.Dataset.from_tensor_slices(
+            [str(path, 'ascii') for i, path in enumerate(unmasked_list_enum) if negative_indices[i] != -1])
 
-    logdir = "logs/scalars/" + type_str + "-mid-" + str(mid_caps) + "-" + str(dims) + "-out-" + str(output_caps) + \
-             "-" + str(dims)
-    histdir = "logs/hist/" + type_str + "-mid-" + str(mid_caps) + "-" + str(dims) + "-out-" + str(output_caps) + \
-              "-" + str(dims)
-    log_writer = tf.summary.create_file_writer(logdir) if log else None
-    hist_writer = tf.summary.create_file_writer(histdir) if log_vars else None
+        unmasked_list = np.array([unmasked_list_enum[i] for idx, i in enumerate(positive_indices) if negative_indices[idx] != -1])
+        unmasked_epoch_diff_set = tf.data.Dataset.from_tensor_slices([str(path, 'ascii') for path in unmasked_list])
 
-    dataset = Dataset(batch_size=batch_size, base_path_str="../MaskedFaceGeneration/")
-    datasets, labels = dataset.process_split()
+        negatives_list = np.array([unmasked_list_enum[i] for i in negative_indices if i != -1])
+        negatives_epoch_set = tf.data.Dataset.from_tensor_slices([str(path, 'ascii') for path in negatives_list])
 
-    datasets_processed = []
-    for dataset in datasets:
-        transformed_set = dataset.map(Dataset.process_path)
-        transformed_set = transformed_set.batch(batch_size=batch_size)
-        transformed_set = transformed_set.cache()
-        transformed_set = transformed_set.prefetch(16)
+        masked_set = masked_epoch_set.map(Dataset.process_path)
+        unmasked_same_set = unmasked_epoch_same_set.map(Dataset.process_path)
+        unmasked_diff_set = unmasked_epoch_diff_set.map(Dataset.process_path)
+        negatives_set = negatives_epoch_set.map(Dataset.process_path)
 
-        datasets_processed.append(transformed_set)
+        assert len(unmasked_diff_set) == len(unmasked_same_set) == len(masked_set) == len(negatives_set)
 
-    train_set_masked = datasets_processed[0]
-    train_set_unmasked = datasets_processed[1]
-    train_set_labels = labels[0]
+        self._masked_epoch_data = iter(masked_set)
+        self._unmasked_same_epoch_data = iter(unmasked_same_set)
+        self._unmasked_diff_epoch_data = iter(unmasked_diff_set)
+        self._negative_epoch_data = iter(negatives_set)
 
-    test_set_masked = datasets_processed[2]
-    test_set_unmasked = datasets_processed[3]
-    test_set_labels = labels[1]
-
-    # Loss without caps: 10e-6
-    # Loss with caps: 10e-2
-    optimizer = tf.keras.optimizers.Adam(learning_rate=10e-10) if caps else tf.keras.optimizers.Adam(
-        learning_rate=10e-6)
-
-    net = network.SiameseCaps(mid_size=mid_caps, output_size=output_caps, caps=caps, hist_writer=hist_writer)
-    net.build(input_shape=(None, 3, 250, 250, 3))
-    net.summary()
-
-    loss_fn = net.TripletLoss()
-    net.compile(loss=loss_fn, optimizer='adam')
-
-    fcNet = net.faceNet
-
-    steps = 5000
-    epochs = 20
-
-    loss_metric = tf.keras.metrics.Mean()
-    accuracy = tf.keras.metrics.SparseCategoricalAccuracy()
-
-    for epoch in range(epochs):
-        loss_metric.reset_state()
-        accuracy.reset_state()
-
-        embeddings_masked = fcNet.predict(train_set_masked, steps=steps, batch_size=batch_size, verbose=True)
-        embeddings_unmasked = fcNet.predict(train_set_unmasked, steps=steps, batch_size=batch_size, verbose=True)
-
-        ### VALIDATION ###
-        val_masked = fcNet.predict(test_set_masked, steps=steps, batch_size=batch_size, verbose=True)
-        val_unmasked = fcNet.predict(test_set_unmasked, steps=steps, batch_size=batch_size, verbose=True)
-
-        with tf.device("/cpu:0"):
-            indices = batch_hard(embeddings_masked, embeddings_unmasked, chatty=False)
-
-            num_el = len(indices) if steps is None else steps
-            hard_triplets = make_batches(datasets[0],  # train_masked
-                                         datasets[1],  # train_unmasked
-                                         indices, num_el=num_el, batch_size=batch_size)
-
-        step = 0
-        for x, y in tqdm.tqdm(hard_triplets):
-            with tf.GradientTape() as tape:
-                y_ = net(x, training=True)
-                loss_value = loss_fn(y_true=y, y_pred=y_)
-
-            grads = tape.gradient(loss_value, net.trainable_weights)
-            optimizer.apply_gradients(zip(grads, net.trainable_weights))
-
-            loss_metric.update_state(loss_value)
-            # accuracy.update_state(y, net(x, training=True))
-
-            if log:
-                with log_writer.as_default():
-                    tf.summary.scalar("loss_" + str(epoch), loss_value, step=step)
-
-            step += 1
-
-        print("Loss {0} at epoch {1}".format(loss_metric.result(), epoch))
-
-        if log:
-            with log_writer.as_default():
-                tf.summary.scalar("epoch_loss", loss_metric.result(), step=epoch)
-
-        validation_accuracy = 0
-        with tf.device("/cpu:0"):
-            val_indices = batch_hard(val_masked, val_unmasked, chatty=True)
-            val_hard_triplets = make_batches(datasets[2],  # test_masked
-                                             datasets[3],  # test_unmasked
-                                             val_indices, num_el=num_el, batch_size=batch_size)
-
-        for x, _ in tqdm.tqdm(val_hard_triplets):
-            val_y_ = net(x, training=False)
-            anchor, positive, negative = tf.split(val_y_, num_or_size_splits=3, axis=1)
-
-            anchor = tf.reshape(anchor, shape=(1, -1))
-            positive = tf.reshape(positive, shape=(1, -1))
-            negative = tf.reshape(negative, shape=(1, -1))
-
-            positive_dist = tf.reduce_sum(tf.square(anchor - positive), axis=1)
-            negative_dist = tf.reduce_sum(tf.square(anchor - negative), axis=1)
-
-            validation_accuracy = validation_accuracy + 1 if positive_dist < negative_dist else validation_accuracy
-
-        elements_classified = min(len(test_set_masked), steps)
-        correctly_classified = elements_classified - len(val_hard_triplets) + validation_accuracy
-        print("Additional correct classifications:", validation_accuracy)
-        print("Correctly classified:", correctly_classified)
-        print(f"Validation accuracy: {correctly_classified / elements_classified * 100}%")
-        if log:
-            with log_writer.as_default():
-                tf.summary.scalar("validation_accuracy", correctly_classified / elements_classified * 100, step=epoch)
+        return len(masked_set)
