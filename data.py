@@ -70,7 +70,7 @@ def batch_hard(embed_masked, embed_unmasked, labels, chatty=False):
 
 class Dataset:
 
-    def __init__(self, train_test_split=(0.8, 0.2), batch_size=32, base_path_str="../MaskedFaceGeneration"):
+    def __init__(self, train_test_split=(0.8, 0.2), batch_size=32, base_path_str="../MaskedFaceGeneration", more_than=1):
 
         if sum(train_test_split) != 1 or len(train_test_split) != 2:
             raise ValueError("Train/test split must be equal to 1")
@@ -82,12 +82,12 @@ class Dataset:
 
         folder_list = list(pathlib.Path(f"{str(self.basePath / 'LFW')}").glob("./*"))
         unmasked_examples = [list(folder.glob("*.jpg")) for folder in folder_list
-                             if len(list(folder.glob("*.jpg"))) > 1]
+                             if len(list(folder.glob("*.jpg"))) > more_than]
         unmasked_examples = list(itertools.chain.from_iterable(unmasked_examples))
 
         folder_list = list(pathlib.Path(f"{str(self.basePath / 'LFW-masked')}").glob("./*"))
         masked_examples = [list(folder.glob("*.jpg")) for folder in folder_list
-                           if len(list(folder.glob("*.jpg"))) > 1]
+                           if len(list(folder.glob("*.jpg"))) > more_than]
         masked_examples = list(itertools.chain.from_iterable(masked_examples))
 
         self.datasetUnmasked = unmasked_examples
@@ -105,10 +105,13 @@ class Dataset:
         self._train_labels = self._test_labels = []
         self.train_split = train_test_split[0]
 
-    def process_split(self):
+    def process_split(self, shuffle=True):
+        random_state = np.random.RandomState(20210731)
 
         train_paths, test_paths = sklearn.model_selection.train_test_split(self.datasetUnmasked,
-                                                                           train_size=self.train_split)
+                                                                           train_size=self.train_split,
+                                                                           random_state=random_state,
+                                                                           shuffle=shuffle)
 
         self.all_labels = set()
 
@@ -165,13 +168,15 @@ class Dataset:
     def get_data(self, masked=True, train=True):
 
         if masked and train:
-            return self._masked_train_data
-        if masked:
-            return self._masked_test_data
-        if train:
-            return self._unmasked_train_data
+            dataset = self._masked_train_data
+        elif masked:
+            dataset = self._masked_test_data
+        elif train:
+            dataset = self._unmasked_train_data
+        else:
+            dataset = self._unmasked_test_data
 
-        return self._unmasked_test_data
+        return dataset
 
     def get_labels(self, train=True):
 

@@ -336,8 +336,8 @@ def train(disc_1: D.SiameseCaps, disc_loss_fn_1: tf.keras.losses.Loss, disc_opti
 
             # follow down gradient for generator
             gen_loss_began = tf.keras.backend.relu(disc_loss_fn_2(y_true=y, y_pred=x))
-            gen_loss_pixel = tf.reduce_mean(tf.square((tf.subtract(positive, generated_image))))
-            gen_loss_triplet = tf.keras.backend.relu(-gen_loss_fn(None, disc_output_id))
+            gen_loss_pixel = gen_loss_fn(positive, generated_image)
+            gen_loss_triplet = tf.keras.backend.relu(-disc_loss_fn_1(None, disc_output_id))
 
             gen_loss_metric_began.update_state(gen_loss_began)
             gen_loss_metric_pixel.update_state(gen_loss_pixel)
@@ -376,9 +376,8 @@ def train(disc_1: D.SiameseCaps, disc_loss_fn_1: tf.keras.losses.Loss, disc_opti
 
             min_val = total_metric
 
-
 def train_step(disc_1: D.SiameseCaps, disc_loss_fn_1: tf.keras.losses.Loss, disc_optimizer_1: tf.keras.optimizers.Optimizer,
-               disc_2: D.FaceCapsNet, disc_loss_fn_2: tf.keras.losses.Loss, disc_optimizer_2: tf.keras.optimizers.Optimizer,
+               disc_2: G.Reconstruct, disc_loss_fn_2: tf.keras.losses.Loss, disc_optimizer_2: tf.keras.optimizers.Optimizer,
                gen: tf.keras.Model, gen_loss_fn: tf.keras.losses.Loss, gen_optimizer: tf.keras.optimizers.Optimizer,
                anchor, positive_same, positive_diff, negative,
                disc_caps_metric: tf.keras.metrics.Metric, disc_began_metric: tf.keras.metrics.Metric,
@@ -403,13 +402,13 @@ def train_step(disc_1: D.SiameseCaps, disc_loss_fn_1: tf.keras.losses.Loss, disc
 
         if file_writer is not None and step % 100 == 0:
             with file_writer.as_default():
-                images = np.reshape(disc_input.numpy(), (-1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
+                images = tf.reshape(disc_input, (-1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
                 tf.summary.image(f"disc_data_epoch_{epoch}", images, step=step)
 
         # follow down gradient for discriminator
-        disc_loss_fake = disc_loss_fn_1(None, disc_output_fake)
-        disc_loss_real = disc_loss_fn_1(None, disc_output_id)
-        disc_total_loss = tf.keras.backend.relu(disc_loss_real + disc_loss_fake)
+        disc_loss_fake = tf.keras.backend.relu(disc_loss_fn_1(None, disc_output_fake))
+        disc_loss_real = tf.keras.backend.relu(disc_loss_fn_1(None, disc_output_id))
+        disc_total_loss = disc_loss_real + disc_loss_fake
 
     disc_caps_metric.update_state(disc_total_loss)
 
@@ -423,12 +422,12 @@ def train_step(disc_1: D.SiameseCaps, disc_loss_fn_1: tf.keras.losses.Loss, disc
         # train the discriminator on fake sample
         disc_output_fake = disc_2(generated_image, training=True)
 
-        # # train the discriminator in real samples
+        # train the discriminator in real samples
         disc_output_real = disc_2(positive_same, training=True)
 
         if file_writer is not None and step % 100 == 0:
             with file_writer.as_default():
-                images = np.reshape(disc_input.numpy(), (-1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
+                images = tf.reshape(disc_input, (-1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
                 tf.summary.image(f"disc_data_epoch_{epoch}", images, step=step)
 
         disc_loss_fn_2.update_lr(disc_2.optimizer.lr)
@@ -458,7 +457,7 @@ def train_step(disc_1: D.SiameseCaps, disc_loss_fn_1: tf.keras.losses.Loss, disc
 
         if file_writer is not None and step % 100 == 0:
             with file_writer.as_default():
-                images = np.reshape(disc_input.numpy(), (-1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
+                images = tf.reshape(disc_input, (-1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
                 tf.summary.image(f"gen_data_epoch_{epoch}", images, step=step)
 
         disc_loss_fn_2.update_lr(disc_2.optimizer.lr)
@@ -470,10 +469,10 @@ def train_step(disc_1: D.SiameseCaps, disc_loss_fn_1: tf.keras.losses.Loss, disc
         x = tf.concat([positive_same, disc_output_fake], axis=0)
 
         # follow down gradient for generator
-        gen_loss_pixel = tf.reduce_mean(tf.square((tf.subtract(positive_same, generated_image))))
-        gen_loss_triplet = tf.keras.backend.relu(-gen_loss_fn(None, disc_output_id))
+        gen_loss_pixel = gen_loss_fn(positive_same, generated_image)
+        gen_loss_triplet = tf.keras.backend.relu(-disc_loss_fn_1(None, disc_input))
         gen_loss_began = tf.keras.backend.relu(disc_loss_fn_2(y_true=y, y_pred=x))
-        gen_loss_total = gen_loss_pixel + gen_loss_began + gen_loss_triplet
+        gen_loss_total = gen_loss_pixel + gen_loss_triplet + gen_loss_began
 
     gen_loss_metric_began.update_state(gen_loss_began)
     gen_loss_metric_pixel.update_state(gen_loss_pixel)
@@ -488,21 +487,18 @@ if __name__ == "__main__":
     for gpu in gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
 
-    # policy = mixed_precision.Policy('mixed_float16')
-    # mixed_precision.set_policy(policy)
-
     np.set_printoptions(threshold=sys.maxsize)
 
     ### SETUP DATASET ###
     dataset = data.Dataset(batch_size=constants.batch_size, base_path_str="../MaskedFaceGeneration/")
 
     ### SETUP LOGGING ###
-    # logdir = "logs/scalars/" + constants.type_str + "-mid-" + str(constants.mid_caps) + "-" + str(constants.dims) + \
-    #          "-out-" + str(constants.output_caps) + "-" + str(constants.dims)
-    # histdir = "logs/hist/" + constants.type_str + "-mid-" + str(constants.mid_caps) + "-" + str(constants.dims) + \
-    #           "-out-" + str(constants.output_caps) + "-" + str(constants.dims)
-    # log_writer = tf.summary.create_file_writer(logdir) if constants.log else None
-    # hist_writer = tf.summary.create_file_writer(histdir) if constants.log_vars else None
+    logdir = "logs/scalars/" + constants.type_str + "-mid-" + str(constants.mid_caps) + "-" + str(constants.dims) + \
+             "-out-" + str(constants.output_caps) + "-" + str(constants.dims)
+    histdir = "logs/hist/" + constants.type_str + "-mid-" + str(constants.mid_caps) + "-" + str(constants.dims) + \
+              "-out-" + str(constants.output_caps) + "-" + str(constants.dims)
+    log_writer = tf.summary.create_file_writer(logdir) if constants.log else None
+    hist_writer = tf.summary.create_file_writer(histdir) if constants.log_vars else None
 
     # Loss without caps: 10e-6
     # Loss with caps: 10e-2
@@ -513,10 +509,9 @@ if __name__ == "__main__":
     gen_optimizer = tf.keras.optimizers.Adam(learning_rate=10e-6) if constants.caps else tf.keras.optimizers.Adam(
         learning_rate=10e-6)
 
-    disc_loss_fn_1 = D.SiameseCaps.TripletLoss(scale=10e10)
+    disc_loss_fn_1 = D.SiameseCaps.TripletLoss(scale=10e-8)
     disc_loss_fn_2 = D.SiameseCaps.BEGANLoss(scale=10e-3)
-    gen_loss_triplet = D.SiameseCaps.TripletLoss(gen=True, scale=10e10)
-    gen_loss_pixel = D.SiameseCaps.PixelLoss()
+    gen_loss_pixel = D.SiameseCaps.PixelLoss(scale=10e2)
 
     disc_1 = D.SiameseCaps(mid_size=constants.mid_caps, dims=constants.dims, output_size=constants.output_caps,
                            caps=constants.caps, hist_writer=None)
@@ -524,26 +519,20 @@ if __name__ == "__main__":
     disc_1.summary()
     disc_1.compile(loss=disc_loss_fn_1, optimizer=disc_optimizer_1)
 
-    disc_2 = D.FaceCapsNet(mid_size=constants.mid_caps, output_size=constants.output_caps, dims=constants.dims,
-                           hist_writer=None, reconstruct=True)
+    disc_2 = G.Reconstruct(faceNet=disc_1.faceNet, output_size=constants.output_caps, dims=constants.dims)
     disc_2.build(input_shape=(None, 1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
     disc_2.summary()
     disc_2.compile(loss=disc_loss_fn_2, optimizer=disc_optimizer_2)
 
     gen = G.ResNetGenerator()
     gen.build(input_shape=(None, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
-    gen.compile(loss=[gen_loss_triplet, disc_loss_fn_2, gen_loss_pixel], optimizer=gen_optimizer)
+    gen.compile(loss=[disc_loss_fn_1, disc_loss_fn_2, gen_loss_pixel], optimizer=gen_optimizer)
     gen.summary()
 
-    tf.keras.utils.plot_model(disc_1.model(), "disc_1.png", show_shapes=True)
-    tf.keras.utils.plot_model(disc_2.model(), "disc_2.png", show_shapes=True)
-    tf.keras.utils.plot_model(gen.model(), "gen.png", show_shapes=True)
-
-    exit(0)
     ### RESTORE ###
-    restore_disc_triplet = False
-    restore_disc_began = False
-    restore_gen = False
+    restore_disc_triplet = True
+    restore_disc_began = True
+    restore_gen = True
 
     disc_triplet_ckpt = tf.train.Checkpoint(optimizer=disc_optimizer_1, net=disc_1)
     disc_triplet_manager = tf.train.CheckpointManager(disc_triplet_ckpt, './tf_triplet_ckpt', max_to_keep=3)
@@ -572,7 +561,7 @@ if __name__ == "__main__":
 
     train(disc_1=disc_1, disc_loss_fn_1=disc_loss_fn_1, disc_optimizer_1=disc_optimizer_1,
           disc_2=disc_2, disc_loss_fn_2=disc_loss_fn_2, disc_optimizer_2=disc_optimizer_2,
-          gen=gen, gen_loss_fn=gen_loss_triplet, gen_optimizer=gen_optimizer,
+          gen=gen, gen_loss_fn=gen_loss_pixel, gen_optimizer=gen_optimizer,
           epochs=constants.epochs, steps=constants.steps, batch_size=constants.batch_size,
           dataset=dataset,
           log=constants.log, log_writer=log_writer,

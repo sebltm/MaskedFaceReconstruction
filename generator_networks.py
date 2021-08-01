@@ -3,6 +3,7 @@ import tensorflow.keras.activations
 import tensorflow.keras.layers as layers
 
 import constants
+import discriminator_networks as D
 
 
 class ClassicGenerator(tf.keras.Model):
@@ -143,7 +144,8 @@ class ResNetGenerator(tf.keras.Model):
             self.Upsample(64, 3)
         ]
 
-        self.last = layers.Conv2DTranspose(outputs_channels, 4, strides=2, padding='same', activation='relu')
+        self.last = layers.Conv2DTranspose(outputs_channels, 4, strides=2, padding='same', activation='relu',
+                                           dtype='float32')
 
         self.out = self.call(self.input_layer)
 
@@ -203,13 +205,80 @@ class ResNetGenerator(tf.keras.Model):
 
             self.dropout = layers.Dropout(0.5)
 
-
         def call(self, inputs, *args, **kwargs):
             outputs = self.conv(inputs)
 
             return outputs
 
 
+class Reconstruct(tf.keras.Model):
+
+    def __init__(self, faceNet, output_size, dims, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.output_size = output_size
+        self.dims = dims
+
+        self.faceNet = faceNet
+
+        self.dec_conv1_1 = layers.Conv2DTranspose(filters=512, kernel_size=5, strides=1)
+        self.dec_conv1_2 = layers.Conv2DTranspose(filters=512, kernel_size=4, strides=1)
+        self.dec_conv1_3 = layers.Conv2DTranspose(filters=512, kernel_size=4, strides=1)
+        self.dec_conv1_4 = layers.Conv2DTranspose(filters=512, kernel_size=4, strides=1)
+        self.batch_norm1 = layers.BatchNormalization()
+
+        self.dec_upsamp2 = layers.UpSampling2D(size=(2, 2))
+        self.dec_conv2_1 = layers.Conv2DTranspose(filters=256, kernel_size=4, strides=1)
+        self.dec_conv2_2 = layers.Conv2DTranspose(filters=256, kernel_size=4, strides=1)
+        self.dec_conv2_3 = layers.Conv2DTranspose(filters=256, kernel_size=4, strides=1)
+        self.dec_conv2_4 = layers.Conv2DTranspose(filters=256, kernel_size=4, strides=1)
+        self.batch_norm2 = layers.BatchNormalization()
+
+        self.dec_upsamp3 = layers.UpSampling2D(size=(2, 2))
+        self.dec_conv3_1 = layers.Conv2DTranspose(filters=128, kernel_size=4, strides=1)
+        self.dec_conv3_2 = layers.Conv2DTranspose(filters=128, kernel_size=4, strides=1)
+        self.batch_norm3 = layers.BatchNormalization()
+
+        self.dec_upsamp4 = layers.UpSampling2D(size=(2, 2))
+        self.dec_conv4_1 = layers.Conv2DTranspose(filters=64, kernel_size=4, strides=1)
+        self.dec_conv4_2 = layers.Conv2DTranspose(filters=64, kernel_size=4, strides=1)
+        self.batch_norm4 = layers.BatchNormalization()
+
+        self.dec_conv5_1 = layers.Conv2DTranspose(filters=3, kernel_size=4, strides=1)
+        self.dec_conv5_2 = layers.Conv2DTranspose(filters=3, kernel_size=4, strides=1, dtype='float32')
+
+    def call(self, inputs, training=None, mask=None):
+
+        output = self.faceNet(inputs)
+        output = tf.reshape(output, shape=(-1, self.output_size, self.dims, 1))
+
+        output = self.dec_conv1_1(output)
+        output = self.dec_conv1_2(output)
+        output = self.dec_conv1_3(output)
+        output = self.dec_conv1_4(output)
+        output = self.batch_norm1(output)
+
+        output = self.dec_upsamp2(output)
+        output = self.dec_conv2_1(output)
+        output = self.dec_conv2_2(output)
+        output = self.dec_conv2_3(output)
+        output = self.dec_conv2_4(output)
+        output = self.batch_norm2(output)
+
+        output = self.dec_upsamp3(output)
+        output = self.dec_conv3_1(output)
+        output = self.dec_conv3_2(output)
+        output = self.batch_norm3(output)
+
+        output = self.dec_upsamp4(output)
+        output = self.dec_conv4_1(output)
+        output = self.dec_conv4_2(output)
+        output = self.batch_norm4(output)
+
+        output = self.dec_conv5_1(output)
+        output = self.dec_conv5_2(output)
+
+        return output
 
 
 class CapsGenerator(tf.keras.Model):
