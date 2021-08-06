@@ -4,7 +4,6 @@ from datetime import datetime
 import numpy as np
 import tensorflow as tf
 import tqdm
-from tensorflow.keras.mixed_precision import experimental as mixed_precision
 
 import constants
 import data
@@ -114,69 +113,74 @@ def train_gen(gen: G.ClassicGenerator, disc: D.SiameseCaps,
 
 def train_disc(disc: D.SiameseCaps, loss_fn, optimizer,
                epochs, steps, batch_size,
-               loss_metric,
                dataset: data.Dataset,
                log, log_writer, checkpoint_manager: tf.train.CheckpointManager):
-    datasets, labels = dataset.process_split()
 
-    datasets_processed = []
-    for dataset in datasets:
-        transformed_set = dataset.map(data.Dataset.process_path)
-        transformed_set = transformed_set.batch(batch_size=batch_size)
-        transformed_set = transformed_set.cache()
-        transformed_set = transformed_set.prefetch(16)
-
-        datasets_processed.append(transformed_set)
-
-    train_set_masked = datasets_processed[0]
-    train_set_unmasked = datasets_processed[1]
-    train_set_labels = labels[0]
-
-    test_set_masked = datasets_processed[2]
-    test_set_unmasked = datasets_processed[3]
-    test_set_labels = labels[1]
+    dataset.process_split()
+    disc_caps_metric = tf.keras.metrics.Mean()
 
     fcNet = disc.faceNet
 
     for epoch in range(epochs):
-        loss_metric.reset_state()
+        disc_caps_metric.reset_state()
 
-        embeddings_masked = fcNet.predict(train_set_masked, steps=steps, batch_size=batch_size, verbose=True)
-        embeddings_unmasked = fcNet.predict(train_set_unmasked, steps=steps, batch_size=batch_size, verbose=True)
+        masked_data = dataset.get_data(masked=True, train=True).take(steps).map(dataset.process_path)
+        unmasked_data = dataset.get_data(masked=False, train=True).take(steps).map(dataset.process_path)
+
+        print("\nCalculating embeddings for original images:", flush=True)
+        embeddings_masked = fcNet.predict(masked_data, steps=steps, batch_size=1, verbose=True)
+        embeddings_unmasked = fcNet.predict(unmasked_data, steps=steps, batch_size=1, verbose=True)
+
+        masked_data = dataset.get_data(masked=True, train=False).take(steps).map(dataset.process_path)
+        unmasked_data = dataset.get_data(masked=False, train=False).take(steps).map(dataset.process_path)
 
         ### VALIDATION ###
-        val_masked = fcNet.predict(test_set_masked, steps=steps, batch_size=batch_size, verbose=True)
-        val_unmasked = fcNet.predict(test_set_unmasked, steps=steps, batch_size=batch_size, verbose=True)
+        val_masked = fcNet.predict(masked_data, steps=steps, batch_size=batch_size, verbose=True)
+        val_unmasked = fcNet.predict(unmasked_data, steps=steps, batch_size=batch_size, verbose=True)
 
-        with tf.device("/cpu:0"):
-            indices = data.batch_hard(embeddings_masked, embeddings_unmasked, chatty=False)
+        labels = list(dataset.get_labels(train=True).take(steps).as_numpy_iterator())
+        embeddings_masked = tf.reshape(embeddings_masked, shape=(steps, -1))
+        embeddings_unmasked = tf.reshape(embeddings_unmasked, shape=(steps, -1))
+        negative_indices, positive_indices = data.batch_hard(embeddings_masked, embeddings_unmasked, labels)
+        num_el = dataset.extract_sets(negative_indices, positive_indices, steps, train=True)
 
-            num_el = len(indices) if steps is None else steps
-            hard_triplets = dataset.make_batches(indices, num_el=num_el, batch_size=batch_size, train=True)
+        for step in tqdm.tqdm(range(num_el)):
+            anchor, _, positive_diff, negative = dataset.next_triplet()
 
-        step = 0
-        for x, y in tqdm.tqdm(hard_triplets):
-            ind_train_step(disc, x, y, loss_fn, optimizer, loss_metric, epoch, step, log, log_writer)
-            step += 1
+            anchor = tf.reshape(anchor, shape=(batch_size, 1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
+            positive_diff = tf.reshape(positive_diff, shape=(batch_size, 1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
+            negative = tf.reshape(negative, shape=(batch_size, 1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
 
-        print("Loss {0} at epoch {1}".format(loss_metric.result(), epoch))
+            x = tf.stack((anchor, positive_diff, negative), axis=1)
+            y = None
 
-        if checkpoint_manager:
-            save_path = checkpoint_manager.save()
-            print("Saved checkpoint for epoch {}: {}".format(epoch, save_path))
+            ind_train_step(disc, x, y, loss_fn, optimizer, disc_caps_metric, epoch, step, log, log_writer)
+
+        print("Loss {0} at epoch {1}".format(disc_caps_metric.result(), epoch))
 
         if log:
             with log_writer.as_default():
-                tf.summary.scalar("epoch_loss_disc", loss_metric.result(), step=epoch)
+                tf.summary.scalar("epoch_loss_disc", disc_caps_metric.result(), step=epoch)
 
+        ### VALIDATION ###
         validation_accuracy = 0
-        with tf.device("/cpu:0"):
-            val_indices = data.batch_hard(val_masked, val_unmasked, chatty=False)
-            num_el = len(val_indices) if steps is None else steps
 
-            val_hard_triplets = dataset.make_batches(val_indices, num_el=num_el, batch_size=batch_size, train=False)
+        if steps > len(dataset.get_data(masked=True, train=False)):
+            val_len = len(dataset.get_data(masked=True, train=False))
+        else:
+            val_len = steps
 
-        for x, _ in tqdm.tqdm(val_hard_triplets):
+        labels = list(dataset.get_labels(train=False).take(val_len).as_numpy_iterator())
+
+        embeddings_masked = tf.reshape(val_masked, shape=(val_len, -1))
+        embeddings_unmasked = tf.reshape(val_unmasked, shape=(val_len, -1))
+        negative_indices, positive_indices = data.batch_hard(embeddings_masked, embeddings_unmasked, labels)
+        num_el = dataset.extract_sets(negative_indices, positive_indices, val_len, train=False)
+
+        for step in tqdm.tqdm(range(num_el)):
+            anchor, _, positive, negative = dataset.next_triplet()
+
+            x = tf.stack((anchor, positive, negative), axis=1)
             val_y_ = disc(x, training=False)
             anchor, positive, negative = tf.split(val_y_, num_or_size_splits=3, axis=1)
 
@@ -189,8 +193,8 @@ def train_disc(disc: D.SiameseCaps, loss_fn, optimizer,
 
             validation_accuracy = validation_accuracy + 1 if positive_dist < negative_dist else validation_accuracy
 
-        elements_classified = min(len(test_set_masked), steps)
-        correctly_classified = elements_classified - len(val_hard_triplets) + validation_accuracy
+        elements_classified = val_len
+        correctly_classified = elements_classified - num_el + validation_accuracy
         print("Additional correct classifications:", validation_accuracy)
         print("Correctly classified:", correctly_classified)
         print(f"Validation accuracy: {correctly_classified / elements_classified * 100}%")
@@ -200,6 +204,7 @@ def train_disc(disc: D.SiameseCaps, loss_fn, optimizer,
 
 
 def ind_train_step(net, x, y, loss_fn, optimizer, loss_metric, epoch, step, log, log_writer):
+
     with tf.GradientTape() as tape:
         y_ = net(x, training=True)
         loss_value = loss_fn(y_true=y, y_pred=y_)
@@ -302,8 +307,12 @@ def train(disc_1: D.SiameseCaps, disc_loss_fn_1: tf.keras.losses.Loss, disc_opti
         gen_loss_metric_triplet.reset_state()
 
         ### VALIDATION ###
-        labels = list(dataset.get_labels(train=False).take(steps).as_numpy_iterator())
-        val_len = len(labels)
+        if steps > len(dataset.get_data(masked=True, train=False)):
+            val_len = len(dataset.get_data(masked=True, train=False))
+        else:
+            val_len = steps
+
+        labels = list(dataset.get_labels(train=False).take(val_len).as_numpy_iterator())
 
         embeddings_masked = tf.reshape(val_masked, shape=(val_len, -1))
         embeddings_unmasked = tf.reshape(val_unmasked, shape=(val_len, -1))
@@ -497,16 +506,16 @@ if __name__ == "__main__":
     dataset = data.Dataset(batch_size=constants.batch_size, base_path_str="../MaskedFaceGeneration/")
 
     ### SETUP LOGGING ###
-    # logdir = "logs/scalars/" + constants.type_str + "-mid-" + str(constants.mid_caps) + "-" + str(constants.dims) + \
-    #          "-out-" + str(constants.output_caps) + "-" + str(constants.dims)
-    # histdir = "logs/hist/" + constants.type_str + "-mid-" + str(constants.mid_caps) + "-" + str(constants.dims) + \
-    #           "-out-" + str(constants.output_caps) + "-" + str(constants.dims)
-    # log_writer = tf.summary.create_file_writer(logdir) if constants.log else None
-    # hist_writer = tf.summary.create_file_writer(histdir) if constants.log_vars else None
+    logdir = "logs/scalars/" + constants.type_str + "-mid-" + str(constants.mid_caps) + "-" + str(constants.dims) + \
+             "-out-" + str(constants.output_caps) + "-" + str(constants.dims)
+    histdir = "logs/hist/" + constants.type_str + "-mid-" + str(constants.mid_caps) + "-" + str(constants.dims) + \
+              "-out-" + str(constants.output_caps) + "-" + str(constants.dims)
+    log_writer = tf.summary.create_file_writer(logdir) if constants.log else None
+    hist_writer = tf.summary.create_file_writer(histdir) if constants.log_vars else None
 
     # Loss without caps: 10e-6
     # Loss with caps: 10e-2
-    disc_optimizer_1 = tf.keras.optimizers.Adam(learning_rate=10e-8) if constants.caps else tf.keras.optimizers.Adam(
+    disc_optimizer_1 = tf.keras.optimizers.Adam(learning_rate=10e-10) if constants.caps else tf.keras.optimizers.Adam(
         learning_rate=10e-8)
     disc_optimizer_2 = tf.keras.optimizers.Adam(learning_rate=10e-8) if constants.caps else tf.keras.optimizers.Adam(
         learning_rate=10e-8)
@@ -535,11 +544,6 @@ if __name__ == "__main__":
     gen.compile(loss=[gen_loss_triplet, disc_loss_fn_2, gen_loss_pixel], optimizer=gen_optimizer)
     gen.summary()
 
-    tf.keras.utils.plot_model(disc_1.model(), "disc_1.png", show_shapes=True)
-    tf.keras.utils.plot_model(disc_2.model(), "disc_2.png", show_shapes=True)
-    tf.keras.utils.plot_model(gen.model(), "gen.png", show_shapes=True)
-
-    exit(0)
     ### RESTORE ###
     restore_disc_triplet = False
     restore_disc_began = False
@@ -565,11 +569,12 @@ if __name__ == "__main__":
 
     fcNet = disc_1.faceNet
 
-    # train_disc(disc=disc, loss_fn=disc_loss_fn, optimizer=disc_optimizer,
-    #            epochs=15, steps=steps, batch_size=batch_size,
-    #            loss_metric=disc_loss_metric, dataset=dataset,
-    #            log=log, log_writer=log_writer, checkpoint_manager=manager)
+    train_disc(disc=disc_1, loss_fn=disc_loss_fn_1, optimizer=disc_optimizer_1,
+               epochs=constants.epochs, steps=constants.steps, batch_size=constants.batch_size,
+               dataset=dataset,
+               log=constants.log, log_writer=log_writer, checkpoint_manager=disc_triplet_manager)
 
+    exit(0)
     train(disc_1=disc_1, disc_loss_fn_1=disc_loss_fn_1, disc_optimizer_1=disc_optimizer_1,
           disc_2=disc_2, disc_loss_fn_2=disc_loss_fn_2, disc_optimizer_2=disc_optimizer_2,
           gen=gen, gen_loss_fn=gen_loss_triplet, gen_optimizer=gen_optimizer,

@@ -19,7 +19,7 @@ class CapsLayer(tf.keras.layers.Layer):
         self.dim_caps = dim_caps
         self.routings = routings
         self.kernel_init = tf.keras.initializers.get(init)
-        self.squash_agreement = tf.keras.layers.Lambda(squash, arguments={"axis": -2}, dtype='float32')
+        self.squash_agreement = tf.keras.layers.Lambda(squash, arguments={"axis": -1}, dtype='float32')
 
         self.batch_size = None
         self.input_num_caps = None
@@ -50,20 +50,17 @@ class CapsLayer(tf.keras.layers.Layer):
         # k = input_dim_caps
         # l = dim_caps
 
-        inputs = tf.reshape(inputs, shape=(-1, self.input_num_caps, 1, self.input_dim_caps, 1))
-        inputs = tf.tile(inputs, [1, 1, self.num_caps, 1, 1])
-
         # W_shape = (input_num_caps, num_caps, dim_caps, input_dim_caps) = (i, j, l, k)
-        # inputs_shape = (batch, input_num_caps, num_caps, input_dim_caps, 1) = (b, i, j, k, m)
-        # output_shape = (batch, input_num_caps, num_caps, dim_caps, 1) = (b, i, j, l, m)
-        uji = tf.einsum('ijlk,bijkm->bijlm', self.W, inputs, name="predict_caps2")
+        # inputs_shape = (batch, input_num_caps, input_dim_caps) = (b, i, k)
+        # output_shape = (batch, input_num_caps, num_caps, dim_caps) = (b, i, j, l)
+        uji = tf.einsum('ijlk,bik->bijl', self.W, inputs, name="predict_caps2")
 
         if self.hist_writer:
             with self.hist_writer.as_default():
                 tf.summary.histogram("uji", uji, step=self.step)
 
         # b_shape = (batch, input_num_caps, num_caps) = (batch, 219024, 10, 1)
-        b = tf.zeros(shape=[1, self.input_num_caps, self.num_caps, 1, 1])
+        b = tf.zeros(shape=[1, self.input_num_caps, self.num_caps, 1])
         vj = None
         for i in range(self.routings):
             cj = tf.nn.softmax(b, axis=-1)
@@ -76,16 +73,15 @@ class CapsLayer(tf.keras.layers.Layer):
                     tf.summary.histogram("s", s, step=self.step)
 
             vj = self.squash_agreement(s)
-            vj_tiled = tf.tile(vj, [1, self.input_num_caps, 1, 1, 1])
             if self.hist_writer:
                 with self.hist_writer.as_default():
                     tf.summary.histogram("vj", vj, step=self.step)
 
-            # uji_shape = (batch, 219024, 16, 8, 1) = (b, i, j, k)
-            # vj_shape = (batch, 8, 16, 8, 1) = (b, k, j, l)
-            # agreement_output = (batch, 21924, 10, 1) = (b, i, j, m)
-            # agreement = tf.einsum('bijk,bmjk->bijm', uji, vj)
-            agreement = tf.matmul(uji, vj_tiled, transpose_a=True)
+            # uji_shape = (batch, 123008, 10, 8) = (b, i, j, k)
+            # vj_shape = (batch, 1, 10, 8) = (b, l, j, k)
+            # agreement_output = (batch, 123008, 10, 1) = (b, i, j, l)
+            agreement = tf.einsum('bijk,bljk->bijl', uji, vj)
+            # agreement = tf.matmul(uji, vj_tiled, transpose_a=True)
             if self.hist_writer:
                 with self.hist_writer.as_default():
                     tf.summary.histogram("agreement", agreement, step=self.step)

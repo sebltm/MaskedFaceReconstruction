@@ -10,7 +10,7 @@ dims = 10
 
 ### SETUP TRAINING VARIABLES ###
 batch_size = 1
-steps = 5000
+steps = 1000
 epochs = 1000
 
 log = True
