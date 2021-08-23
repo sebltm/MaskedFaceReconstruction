@@ -253,7 +253,7 @@ class SiameseCaps(tf.keras.models.Model):
 
     class TripletLoss(tf.keras.losses.Loss):
 
-        def __init__(self, alpha=10e-14, gen=False, scale=1):
+        def __init__(self, alpha=10e-10, gen=False, scale=1):
             super().__init__()
 
             self.alpha = alpha
