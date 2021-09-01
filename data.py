@@ -2,25 +2,24 @@ import itertools
 import pathlib
 
 import numpy as np
+import numpy.random
 import sklearn.model_selection
 import tensorflow as tf
 
 import constants
 
 
-def batch_hard(embed_masked, embed_unmasked, labels, chatty=False):
+def batch_hard(embed_masked, embed_unmasked, labels, margin=10e-14, verbose=0):
 
     # Get the dot product
-    na = tf.matmul(embed_masked, tf.transpose(embed_masked))
-    nb = tf.matmul(embed_unmasked, tf.transpose(embed_unmasked))
+    na = tf.reduce_sum(tf.square(embed_masked), axis=1, keepdims=True)
+    na = tf.tile(na, [1, embed_unmasked.shape[0]])
 
-    square_norm_na = tf.linalg.diag_part(na)
-    square_norm_nb = tf.linalg.diag_part(nb)
+    nb = tf.reduce_sum(tf.square(embed_unmasked), axis=1, keepdims=True)
+    nb = tf.transpose(tf.tile(nb, [1, embed_masked.shape[0]]))
 
     # Get the distance matrix
-    distance = tf.sqrt(tf.maximum(tf.expand_dims(square_norm_na, 0)
-                                  - 2 * tf.matmul(embed_masked, tf.transpose(embed_unmasked))
-                                  + tf.expand_dims(square_norm_nb, 1), 0.0))
+    distance = na - 2 * tf.matmul(embed_masked, tf.transpose(embed_unmasked)) + nb
 
     # Tile the label array: each row contains the labels
     label_array = tf.expand_dims(labels, axis=0)
@@ -31,23 +30,21 @@ def batch_hard(embed_masked, embed_unmasked, labels, chatty=False):
     diag_label = tf.tile(diag_label, [1, len(labels)])
 
     # Get the max distance for each image
-    max_dist = tf.reduce_max(distance, axis=0)
+    max_dist = tf.reduce_max(distance, axis=1)
     max_dist = tf.expand_dims(max_dist, axis=-1)
     max_dist = tf.tile(max_dist, [1, len(max_dist)])
-
-    diag = tf.linalg.diag_part(distance)
 
     zero_array = tf.zeros(shape=distance.shape)
 
     # Get the index of positive with largest distance
     find_max_positive = tf.where(label_array == diag_label, distance, zero_array)
-    diag = tf.reduce_max(find_max_positive, axis=0)
-    positive_indices = tf.math.argmax(find_max_positive, axis=0)
+    diag = tf.reduce_max(find_max_positive, axis=1)
+    positive_indices = tf.math.argmax(find_max_positive, axis=1)
 
-    dot_product = tf.where(label_array == diag_label, max_dist, distance)
+    find_min_negative = tf.where(label_array == diag_label, max_dist, distance)
 
-    mins = tf.reduce_min(dot_product, axis=0)
-    indices = tf.math.argmin(dot_product, axis=0)
+    mins = tf.reduce_min(find_min_negative, axis=1)
+    indices = tf.math.argmin(find_min_negative, axis=1)
 
     mask = mins <= diag
     none_array = tf.fill(tf.shape(indices), -1)
@@ -55,15 +52,26 @@ def batch_hard(embed_masked, embed_unmasked, labels, chatty=False):
 
     negative_indices = tf.where(mask, indices, none_array)
 
-    if chatty:
-        print("Dist", distance.numpy())
-        print("Label", label_array == diag_label)
-        print("Find_max_positive", find_max_positive)
-        print("Positive_indices", positive_indices)
+    if verbose > 3:
+        print("Label_same", label_array == diag_label)
+        print("Find_max_positive", find_max_positive.numpy())
+        print("Find_min_negative", find_min_negative)
+    if verbose > 2:
+        print("Dist", distance)
+    if verbose > 1:
         print("Diag", diag.numpy())
         print("Mins", mins.numpy())
         print("Negative", negative_indices.numpy())
         print("Positive", positive_indices.numpy())
+    if verbose > 0:
+        neg_ind_numpy = negative_indices.numpy()
+        dist_numpy = distance.numpy()
+
+        loss = []
+        for i, neg_ind in enumerate(neg_ind_numpy):
+            if neg_ind != -1:
+                loss.append(dist_numpy[i][positive_indices.numpy()[i]] - dist_numpy[i][neg_ind])
+        print("Average loss", np.mean(loss))
 
     return negative_indices, positive_indices
 
@@ -106,7 +114,7 @@ class Dataset:
         self.train_split = train_test_split[0]
 
     def process_split(self, shuffle=True):
-        random_state = np.random.RandomState(20210731)
+        random_state = numpy.random.RandomState(20210731)
 
         train_paths, test_paths = sklearn.model_selection.train_test_split(self.datasetUnmasked,
                                                                            train_size=self.train_split,
@@ -168,15 +176,13 @@ class Dataset:
     def get_data(self, masked=True, train=True):
 
         if masked and train:
-            dataset = self._masked_train_data
-        elif masked:
-            dataset = self._masked_test_data
-        elif train:
-            dataset = self._unmasked_train_data
+            return self._masked_train_data
+        elif masked and not train:
+            return self._masked_test_data
+        elif not masked and train:
+            return self._unmasked_train_data
         else:
-            dataset = self._unmasked_test_data
-
-        return dataset
+            return self._unmasked_test_data
 
     def get_labels(self, train=True):
 
@@ -186,13 +192,13 @@ class Dataset:
         return self._test_labels
 
     @staticmethod
-    def process_path(file_path):
+    def process_path(file_path, image_size=constants.IMAGE_SIZE):
         try:
             image_raw = tf.io.read_file(file_path)
             image = tf.image.decode_jpeg(image_raw, channels=3)
             img_conv = tf.image.convert_image_dtype(image, dtype=tf.float32, saturate=False)
-            img_resize = tf.image.resize(img_conv, size=(constants.IMAGE_SIZE, constants.IMAGE_SIZE))
-            ind_img = tf.reshape(img_resize, shape=(1, constants.IMAGE_SIZE, constants.IMAGE_SIZE, 3))
+            img_resize = tf.image.resize(img_conv, size=(image_size, image_size))
+            ind_img = tf.reshape(img_resize, shape=(1, image_size, image_size, 3))
 
             return ind_img
         except TypeError:

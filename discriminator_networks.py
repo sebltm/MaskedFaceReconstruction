@@ -120,14 +120,69 @@ class FaceCapsNet(tf.keras.Model):
 
         self.face_caps.build(input_shape=prim_caps_out)
 
+        if self.reconstruct:
+            # self.dec_upsamp1 = layers.UpSampling2D(size=(2, 2))
+            self.dec_conv1_1 = layers.Conv2DTranspose(filters=512, kernel_size=5, strides=1)
+            self.dec_conv1_2 = layers.Conv2DTranspose(filters=512, kernel_size=4, strides=1)
+            self.dec_conv1_3 = layers.Conv2DTranspose(filters=512, kernel_size=4, strides=1)
+            self.dec_conv1_4 = layers.Conv2DTranspose(filters=512, kernel_size=4, strides=1)
+            self.batch_norm1 = layers.BatchNormalization()
 
+            self.dec_upsamp2 = layers.UpSampling2D(size=(2, 2))
+            self.dec_conv2_1 = layers.Conv2DTranspose(filters=256, kernel_size=4, strides=1)
+            self.dec_conv2_2 = layers.Conv2DTranspose(filters=256, kernel_size=4, strides=1)
+            self.dec_conv2_3 = layers.Conv2DTranspose(filters=256, kernel_size=4, strides=1)
+            self.dec_conv2_4 = layers.Conv2DTranspose(filters=256, kernel_size=4, strides=1)
+            self.batch_norm2 = layers.BatchNormalization()
+
+            self.dec_upsamp3 = layers.UpSampling2D(size=(2, 2))
+            self.dec_conv3_1 = layers.Conv2DTranspose(filters=128, kernel_size=4, strides=1)
+            self.dec_conv3_2 = layers.Conv2DTranspose(filters=128, kernel_size=4, strides=1)
+            self.batch_norm3 = layers.BatchNormalization()
+
+            self.dec_upsamp4 = layers.UpSampling2D(size=(2, 2))
+            self.dec_conv4_1 = layers.Conv2DTranspose(filters=64, kernel_size=4, strides=1)
+            self.dec_conv4_2 = layers.Conv2DTranspose(filters=64, kernel_size=4, strides=1)
+            self.batch_norm4 = layers.BatchNormalization()
+
+            self.dec_conv5_1 = layers.Conv2DTranspose(filters=3, kernel_size=4, strides=1)
+            self.dec_conv5_2 = layers.Conv2DTranspose(filters=3, kernel_size=4, strides=1, dtype='float32')
 
         self.out = self.call(self.input_layer)
 
-    def call(self, inputs, training=False, mask=None, reconstruct=False):
+    def call(self, inputs, training=False, mask=None):
         output = self.reshape(inputs)
         output = self.primary_caps(output)
         output = self.face_caps(output)
+
+        if self.reconstruct:
+            output = tf.reshape(output, shape=(-1, self.output_size, self.dims, 1))
+
+            output = self.dec_conv1_1(output)
+            output = self.dec_conv1_2(output)
+            output = self.dec_conv1_3(output)
+            output = self.dec_conv1_4(output)
+            output = self.batch_norm1(output)
+
+            output = self.dec_upsamp2(output)
+            output = self.dec_conv2_1(output)
+            output = self.dec_conv2_2(output)
+            output = self.dec_conv2_3(output)
+            output = self.dec_conv2_4(output)
+            output = self.batch_norm2(output)
+
+            output = self.dec_upsamp3(output)
+            output = self.dec_conv3_1(output)
+            output = self.dec_conv3_2(output)
+            output = self.batch_norm3(output)
+
+            output = self.dec_upsamp4(output)
+            output = self.dec_conv4_1(output)
+            output = self.dec_conv4_2(output)
+            output = self.batch_norm4(output)
+
+            output = self.dec_conv5_1(output)
+            output = self.dec_conv5_2(output)
 
         return output
 
@@ -198,7 +253,7 @@ class SiameseCaps(tf.keras.models.Model):
 
     class TripletLoss(tf.keras.losses.Loss):
 
-        def __init__(self, alpha=10e-14, gen=False, scale=1):
+        def __init__(self, alpha=10e-10, gen=False, scale=1):
             super().__init__()
 
             self.alpha = alpha
@@ -218,6 +273,9 @@ class SiameseCaps(tf.keras.models.Model):
             negative_dist = tf.reduce_sum(tf.square(tf.subtract(anchor, negative)), axis=1)
 
             loss = positive_dist - negative_dist + self.alpha
+
+            if not self.gen:
+                loss = tf.keras.backend.relu(loss)
 
             return loss * self.scale
 
